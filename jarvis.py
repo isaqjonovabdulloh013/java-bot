@@ -75,11 +75,19 @@ def pick_model():
 
 MODEL = pick_model()
 print("Tanlangan model:", MODEL)
+# Limit tugasa shu tartibda boshqa modelga o'tamiz (dublikatlarsiz)
+FALLBACKS = [m for m in ["llama-3.1-8b-instant", "openai/gpt-oss-20b",
+                         "qwen/qwen3-32b", "llama-3.3-70b-versatile"]
+            if m != MODEL]
+CURRENT_MODEL = {"id": MODEL}   # limit tugasa shu yerda yangilanadi
 history = []
 
-SYSTEM = """Sen Jarvis, egangning shaxsiy yordamchisisan. O'zbek tilida
-(yoki foydalanuvchi tilida) javob ber. Masala yech, topishmoq, she'r,
-kod yoz. Amal kerak bo'lsa vositalardan foydalan.
+SYSTEM = """Sen Jarvis, egangning shaxsiy yordamchisisan. HAR DOIM FAQAT
+o'zbek tilida javob ber, hatto foydalanuvchi rus, ingliz yoki boshqa
+tilda yozsa ham (agar u aniq "ingliz tilida yoz" kabi boshqa tilni
+so'ramasa). Hech qachon ruscha yoki boshqa tilda javob yozma.
+Masala yech, topishmoq, she'r, kod yoz. Amal kerak bo'lsa vositalardan
+foydalan.
 MUHIM: foydalanuvchidan ID, token yoki nom so'rama. Render xizmatini
 nomi bo'yicha o'zing topasan (render_deploy nomni o'zi qidiradi).
 Foydalanuvchi aniq buyruq bergan bo'lsa (deploy, issue ochish, eslatma),
@@ -550,9 +558,26 @@ async def handle_text(chat, text, update, ctx):
     history.append({"role": "user", "content": text})
     try:
         for _ in range(6):  # vosita chaqiruvlari chegarasi
-            resp = await ai.chat.completions.create(
-                model=MODEL, max_tokens=2000, tools=TOOLS,
-                messages=[{"role": "system", "content": SYSTEM}] + trimmed())
+            models_to_try = [CURRENT_MODEL["id"]] + FALLBACKS
+            resp = None
+            for m in models_to_try:
+                try:
+                    resp = await ai.chat.completions.create(
+                        model=m, max_tokens=2000, tools=TOOLS,
+                        messages=[{"role": "system", "content": SYSTEM}] + trimmed())
+                    if m != CURRENT_MODEL["id"]:
+                        print(f"Limit sababli model almashtirildi: {m}")
+                        CURRENT_MODEL["id"] = m
+                    break
+                except Exception as e:
+                    if "429" in str(e) or "rate_limit" in str(e).lower():
+                        continue   # keyingi modelni sinaymiz
+                    raise
+            if resp is None:
+                await update.message.reply_text(
+                    "Barcha bepul modellarning kunlik limiti tugadi. "
+                    "Birozdan so'ng (odatda ertaga) qayta urinib ko'ring.")
+                return
             msg = resp.choices[0].message
             history.append(msg.model_dump(exclude_none=True))
             if not msg.tool_calls:
