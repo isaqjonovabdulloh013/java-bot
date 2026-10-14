@@ -3,3 +3,4 @@ openai
 httpx
 python-dotenv
 telethon
+gTTS
