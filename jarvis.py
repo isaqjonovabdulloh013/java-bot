@@ -1,10 +1,11 @@
-import os, re, json, base64, zipfile, httpx, threading, datetime as dt
+import os, re, json, base64, zipfile, httpx, threading, asyncio, datetime as dt
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from telethon import TelegramClient
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import (ApplicationBuilder, MessageHandler, CommandHandler,
+                          ContextTypes, filters)
 
 UPLOADS = {}   # chat_id -> oxirgi yuklangan faylning diskdagi manzili
 
@@ -59,8 +60,9 @@ def available_models():
     try:
         r = httpx.get("https://api.groq.com/openai/v1/models", timeout=30,
                       headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"}).json()
-        ids = [m["id"] for m in r["data"] if "whisper" not in m["id"]
-               and "tts" not in m["id"] and "guard" not in m["id"]]
+        BAD = ("whisper", "tts", "guard", "orpheus", "canopylabs", "allam")
+        ids = [m["id"] for m in r["data"]
+              if not any(b in m["id"].lower() for b in BAD)]
         print("Mavjud modellar:", ids)
         return ids
     except Exception as e:
@@ -121,7 +123,9 @@ chaqir (repo nomi aytilmagan bo'lsa so'ra). Foydalanuvchi "yangi repo
 ochib" desa, avval github_create_repo bilan yarat, keyin shu repoga
 github_push_upload bilan faylni joyla. Foydalanuvchi fayl o'rniga
 havola (link) bersa, avval download_url bilan yuklab ol, keyin
-github_push_upload bilan joyla."""
+github_push_upload bilan joyla.
+Foydalanuvchi "ovozli ayt", "ovoz bilan" yoki shunga o'xshash desa,
+send_voice vositasini chaqir (tasdiq kerak emas, oddiy ovozli javob)."""
 
 def tool(name, desc, props=None, req=None):
     return {"type": "function", "function": {
@@ -168,6 +172,9 @@ TOOLS = [
          "Shaxsiy Telegramdagi bitta chat/guruhning oxirgi xabarlarini o'qiydi",
          {"chat": {"type": "string", "description": "chat nomi, @username yoki ID"},
           "limit": {"type": "integer"}}, ["chat"]),
+    tool("send_voice",
+         "Matnni ovozli xabarga aylantirib, shu chatga yuboradi (haqiqiy qo'ng'iroq emas, ovozli xabar)",
+         {"text": {"type": "string"}}, ["text"]),
     tool("post_story",
          "Foydalanuvchi yuborgan oxirgi rasm/videoni Telegram Story sifatida joylaydi (tasdiq kerak)",
          {"caption": {"type": "string", "description": "ixtiyoriy izoh"}}),
@@ -218,12 +225,12 @@ def find_service(query):
     raise ValueError("Bunday xizmat topilmadi. Mavjudlari: "
                      + ", ".join(s["name"] for s in items))
 
-DONE = {"live": "✅ muvaffaqiyatli deploy bo'ldi",
-        "build_failed": "❌ build xato bilan tugadi",
-        "update_failed": "❌ yangilash xato bilan tugadi",
-        "pre_deploy_failed": "❌ pre-deploy xato bilan tugadi",
-        "canceled": "⚠️ deploy bekor qilindi",
-        "deactivated": "⚠️ deploy o'chirildi"}
+DONE = {"live": "✅ *Muvaffaqiyatli deploy bo'ldi*",
+        "build_failed": "❌ *Build xato bilan tugadi*",
+        "update_failed": "❌ *Yangilash xato bilan tugadi*",
+        "pre_deploy_failed": "❌ *Pre-deploy xato bilan tugadi*",
+        "canceled": "⚠️ *Deploy bekor qilindi*",
+        "deactivated": "⚠️ *Deploy o'chirildi*"}
 
 async def watch_deploy(context: ContextTypes.DEFAULT_TYPE):
     d = context.job.data
@@ -386,13 +393,45 @@ async def start_userbot(application):
 
 async def find_chat(q):
     q = q.strip()
-    if q.startswith("@") or q.lstrip("-").isdigit():
+    if q.startswith("@") or (q.lstrip("-").isdigit() and not q.startswith("+")):
         return await tg.get_entity(q if q.startswith("@") else int(q))
+
+    phone = re.sub(r"[^\d+]", "", q)
+    if phone.startswith("+") and len(phone) >= 9:
+        try:
+            return await tg.get_entity(phone)
+        except Exception:
+            pass
+        try:
+            from telethon.tl.functions.contacts import (
+                ImportContactsRequest, DeleteContactsRequest)
+            from telethon.tl.types import InputPhoneContact
+            res = await tg(ImportContactsRequest(
+                [InputPhoneContact(client_id=0, phone=phone,
+                                   first_name="Jarvis", last_name="")]))
+            if res.users:
+                user = res.users[0]
+                try:
+                    await tg(DeleteContactsRequest(id=[user]))
+                except Exception:
+                    pass
+                return user
+        except Exception:
+            pass
+
     ql = q.lower()
+    try:
+        for u in await tg.get_contacts():
+            full = f"{u.first_name or ''} {u.last_name or ''}".strip().lower()
+            if ql in full:
+                return u
+    except Exception:
+        pass
+
     async for d in tg.iter_dialogs(limit=300):
         if ql in (d.name or "").lower():
             return d.entity
-    raise ValueError(f"'{q}' nomli chat topilmadi")
+    raise ValueError(f"'{q}' nomli chat, kontakt yoki raqam topilmadi")
 
 def sender_name(s):
     return getattr(s, "first_name", None) or getattr(s, "title", None) or "?"
@@ -564,7 +603,30 @@ async def dispatch(name, args, ctx, chat):
             return await tg_recent(**args)
         if name == "tg_read_chat":
             return await tg_read_chat(**args)
+    if name == "send_voice":
+        from gtts import gTTS
+        os.makedirs("tts", exist_ok=True)
+        path = os.path.join("tts", f"{chat}.mp3")
+        gTTS(text=args["text"][:1500], lang="uz").save(path)
+        with open(path, "rb") as f:
+            await ctx.bot.send_voice(chat, f)
+        return "✅ Ovozli xabar yuborildi."
     return run_tool(name, args, ctx)
+
+SPINNER = ["◐", "◓", "◑", "◒"]
+
+async def spin(msg, stop_event, label="Ish bajarilmoqda"):
+    i = 0
+    while not stop_event.is_set():
+        try:
+            await msg.edit_text(f"{SPINNER[i % 4]} *{label}…*", parse_mode="Markdown")
+        except Exception:
+            pass
+        i += 1
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.7)
+        except asyncio.TimeoutError:
+            pass
 
 def trimmed():
     msgs = history[-30:]
@@ -639,17 +701,48 @@ async def handle_text(chat, text, update, ctx):
             history.append(msg.model_dump(exclude_none=True))
             if not msg.tool_calls:
                 break
+            SLOW = {"github_push_upload", "render_deploy", "rotate_bot_token",
+                   "download_url", "github_create_repo"}
             for tc in msg.tool_calls:
+                spin_msg, stop_ev, spin_task = None, None, None
                 try:
                     args = json.loads(tc.function.arguments or "{}")
+                    if tc.function.name in SLOW:
+                        spin_msg = await update.message.reply_text(
+                            f"{SPINNER[0]} *Ish bajarilmoqda…*", parse_mode="Markdown")
+                        stop_ev = asyncio.Event()
+                        spin_task = asyncio.create_task(spin(spin_msg, stop_ev))
                     out = await dispatch(tc.function.name, args, ctx, chat)
+                    if spin_msg:
+                        stop_ev.set()
+                        await spin_task
+                        await spin_msg.edit_text(
+                            "✨ *Tayyor.* Natija pastda 👇", parse_mode="Markdown")
                 except Exception as e:
                     out = f"Xato: {e}"
+                    if spin_msg:
+                        stop_ev.set()
+                        await spin_task
+                        await spin_msg.edit_text("⚠️ *Xatolik yuz berdi.*", parse_mode="Markdown")
                 history.append({"role": "tool", "tool_call_id": tc.id,
                                 "content": json.dumps(out, ensure_ascii=False)})
         await update.message.reply_text(msg.content or "Bajarildi.")
     except Exception as e:
         await update.message.reply_text(f"Xato: {e}")
+
+async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat.id
+    if chat not in AUTHORIZED:
+        return
+    n = 0
+    for job in ctx.job_queue.jobs():
+        d = job.data
+        if isinstance(d, dict) and d.get("chat") == chat:
+            job.schedule_removal()
+            n += 1
+    PENDING.pop(chat, None)
+    await update.message.reply_text(
+        f"⛔ To'xtatildi. {n} ta rejalashtirilgan ish (eslatma/kuzatuv) bekor qilindi.")
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
@@ -682,8 +775,8 @@ PROXY = os.environ.get("PROXY_URL")  # ixtiyoriy, masalan http://127.0.0.1:10809
 if PROXY:
     builder = builder.proxy(PROXY).get_updates_proxy(PROXY)
 app = builder.build()
+app.add_handler(CommandHandler("start", on_start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
 app.add_handler(MessageHandler(filters.Document.ALL, on_document))
-import asyncio
 asyncio.set_event_loop(asyncio.new_event_loop())
 app.run_polling()
