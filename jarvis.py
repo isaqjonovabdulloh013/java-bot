@@ -203,7 +203,8 @@ def gh(method, path, **kw):
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     d = context.job.data
-    await context.bot.send_message(d["chat"], "⏰ " + d["text"])
+    await context.bot.send_message(
+        d["chat"], f"⏰ *Eslatma*\n━━━━━━━━━━━━━━\n{d['text']}", parse_mode="Markdown")
 
 def render_headers():
     return {"Authorization": f"Bearer {os.environ['RENDER_API_KEY']}"}
@@ -243,11 +244,14 @@ async def watch_deploy(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         status = ""
     if status in DONE:
-        await context.bot.send_message(d["chat"], f"{d['name']}: {DONE[status]}")
+        await context.bot.send_message(
+            d["chat"], f"🛰️ *{d['name']}*\n{DONE[status]}", parse_mode="Markdown")
         context.job.schedule_removal()
     elif d["tries"] > 80:  # ~20 daqiqa
         await context.bot.send_message(
-            d["chat"], f"{d['name']}: deploy hali tugamadi, Render panelini tekshiring.")
+            d["chat"],
+            f"🛰️ *{d['name']}*\n⏱️ Deploy hali tugamadi, Render panelini tekshiring.",
+            parse_mode="Markdown")
         context.job.schedule_removal()
 
 def gh_put_file(repo, path, data, message):
@@ -283,7 +287,8 @@ def push_upload(chat, repo, path, commit_message):
             gh_put_file(repo, dest, f.read(), msg)
         pushed.append(dest)
     more = f" (+{len(pushed)-10} yana)" if len(pushed) > 10 else ""
-    return f"{len(pushed)} ta fayl {repo} repoga yuklandi: " + ", ".join(pushed[:10]) + more
+    return (f"🗂️ *{len(pushed)} ta fayl* `{repo}` repoga yuklandi:\n"
+            + ", ".join(pushed[:10]) + more)
 
 def fetch_to_upload(chat, url):
     if not re.match(r"^https?://", url):
@@ -301,7 +306,7 @@ def fetch_to_upload(chat, url):
                     raise ValueError("Fayl juda katta (50 MB dan oshdi).")
                 f.write(chunk)
     UPLOADS[chat] = local_path
-    return f"Yuklab olindi: {name} ({size} bayt). Endi joylash buyrug'ini bering."
+    return f"⬇️ *Yuklab olindi:* {name} ({size} bayt). Endi joylash buyrug'ini bering."
 
 def list_zip(chat):
     local = UPLOADS.get(chat)
@@ -349,7 +354,7 @@ def run_tool(name, args, ctx):
             watch_deploy, interval=15, first=15,
             data={"sid": sid, "did": did, "name": sname, "tries": 0,
                   "chat": CURRENT["chat"]})
-        return (f"{sname} deploy boshlandi. Tugagach foydalanuvchiga "
+        return (f"🛰️ *{sname}* deploy boshlandi. Tugagach foydalanuvchiga "
                 f"o'zim xabar yuboraman.")
     if name == "github_create_repo":
         r = gh("POST", "/user/repos",
@@ -358,9 +363,9 @@ def run_tool(name, args, ctx):
         if "full_name" not in r:
             if "already exists" in json.dumps(r).lower():
                 me = gh("GET", "/user")
-                return f"Repo allaqachon bor: {me.get('login', '')}/{args['name']}"
+                return f"📦 Repo allaqachon bor: {me.get('login', '')}/{args['name']}"
             raise ValueError(str(r))
-        return f"Repo yaratildi: {r['full_name']} ({r['html_url']})"
+        return f"📦 *Repo yaratildi:* {r['full_name']}\n{r['html_url']}"
     if name == "github_push_upload":
         return push_upload(CURRENT["chat"], args["repo"], args.get("path", ""),
                            args.get("commit_message", ""))
@@ -552,7 +557,7 @@ async def execute_sensitive(name, args, ctx):
         raise ValueError("Shaxsiy akkaunt ulanmagan (python tg_login.py ni ishga tushiring)")
     if name == "tg_send_message":
         await tg.send_message(await find_chat(args["chat"]), args["text"])
-        return "✅ Yuborildi."
+        return "📤 *Yuborildi.*"
     if name == "post_story":
         from telethon.tl.functions.stories import SendStoryRequest
         from telethon.tl.types import (InputPrivacyValueAllowAll,
@@ -575,7 +580,7 @@ async def execute_sensitive(name, args, ctx):
         await tg(SendStoryRequest(
             peer="me", media=media, privacy_rules=[InputPrivacyValueAllowAll()],
             caption=args.get("caption") or "", period=86400))
-        return "✅ Story joylandi."
+        return "📖 *Story muvaffaqiyatli joylandi.*"
     if name == "update_profile":
         from telethon.tl.functions.account import UpdateProfileRequest
         kw = {}
@@ -583,19 +588,24 @@ async def execute_sensitive(name, args, ctx):
         if args.get("last_name") is not None: kw["last_name"] = args["last_name"]
         if args.get("about") is not None: kw["about"] = args["about"]
         await tg(UpdateProfileRequest(**kw))
-        return "✅ Profil yangilandi."
+        return "👤 *Profil muvaffaqiyatli yangilandi.*"
     if name == "get_bot_token":
         token = await get_bot_token(args["bot_username"])
         # token to'g'ridan-to'g'ri sizga yuboriladi, AI uni ko'rmaydi
-        return (f"🔑 @{args['bot_username'].lstrip('@')} tokeni:\n{token}\n\n"
-                f"Uni hech kimga ko'rsatmang va chatdan o'chirib qo'ying.")
+        return (f"🔐 *@{args['bot_username'].lstrip('@')} tokeni*\n`{token}`\n\n"
+                f"⚠️ Uni hech kimga ko'rsatmang va chatdan o'chirib qo'ying.")
     return await rotate_token(args["bot_username"], args["render_service"], ctx)
 
 async def dispatch(name, args, ctx, chat):
     if name in SENSITIVE:
         PENDING[chat] = (name, args)
-        return ("TASDIQ KUTILYAPTI. Foydalanuvchiga shuni ko'rsat: "
-                + describe(name, args) + ". 'ha' deb yozsa bajariladi. O'zing bajarma.")
+        await ctx.bot.send_message(
+            chat,
+            "🔔 *Tasdiq talab qilinadi*\n━━━━━━━━━━━━━━\n"
+            + describe(name, args) +
+            "\n\n✅ Tasdiqlash uchun *ha* deb yozing.",
+            parse_mode="Markdown")
+        return "Tasdiq so'rovi foydalanuvchiga allaqachon ko'rsatildi, qayta yozma."
     if name.startswith("tg_"):
         if tg is None:
             raise ValueError("Shaxsiy akkaunt ulanmagan (python tg_login.py ni ishga tushiring)")
@@ -647,7 +657,12 @@ async def handle_text(chat, text, update, ctx):
             except Exception:
                 pass
             await ctx.bot.send_message(
-                chat, "Xush kelibsiz, Abdulloh! Jarvis xizmatingizda. 🤖")
+                chat,
+                "✨ *Jarvis AI*\n"
+                "━━━━━━━━━━━━━━\n"
+                "Xush kelibsiz, Abdulloh.\n"
+                "Xizmatingizdaman. 🤖",
+                parse_mode="Markdown")
             return
         FAILS[chat] = FAILS.get(chat, 0) + 1
         return   # begonalarga hech qanday javob yo'q, botning borligini bildirmaymiz
@@ -667,9 +682,12 @@ async def handle_text(chat, text, update, ctx):
                 out = await execute_sensitive(name, args, ctx)
             except Exception as e:
                 out = f"Xato: {e}"
-            await update.message.reply_text(out)
+            try:
+                await update.message.reply_text(out, parse_mode="Markdown")
+            except Exception:
+                await update.message.reply_text(out)
             return
-        await update.message.reply_text("Amal bekor qilindi.")
+        await update.message.reply_text("🚫 *Amal bekor qilindi.*", parse_mode="Markdown")
         return
 
     history.append({"role": "user", "content": text})
@@ -726,7 +744,11 @@ async def handle_text(chat, text, update, ctx):
                         await spin_msg.edit_text("⚠️ *Xatolik yuz berdi.*", parse_mode="Markdown")
                 history.append({"role": "tool", "tool_call_id": tc.id,
                                 "content": json.dumps(out, ensure_ascii=False)})
-        await update.message.reply_text(msg.content or "Bajarildi.")
+        final = msg.content or "✅ *Bajarildi.*"
+        try:
+            await update.message.reply_text(final, parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(final)
     except Exception as e:
         await update.message.reply_text(f"Xato: {e}")
 
@@ -742,7 +764,9 @@ async def on_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             n += 1
     PENDING.pop(chat, None)
     await update.message.reply_text(
-        f"⛔ To'xtatildi. {n} ta rejalashtirilgan ish (eslatma/kuzatuv) bekor qilindi.")
+        f"⛔ *To'xtatildi*\n━━━━━━━━━━━━━━\n"
+        f"{n} ta rejalashtirilgan ish (eslatma/kuzatuv) bekor qilindi.",
+        parse_mode="Markdown")
 
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat.id
@@ -760,8 +784,9 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await tgfile.download_to_drive(local_path)
     UPLOADS[chat] = local_path
     await update.message.reply_text(
-        f"📎 Fayl qabul qilindi: {doc.file_name} ({doc.file_size} bayt). "
-        f"Endi nima qilishni ayting (masalan: \"shuni X repoga joyla\").")
+        f"📎 *Fayl qabul qilindi*\n{doc.file_name} · {doc.file_size} bayt\n\n"
+        f"Endi nima qilishni ayting (masalan: \"shuni X repoga joyla\").",
+        parse_mode="Markdown")
     caption = (update.message.caption or "").strip()
     if caption:
         note = f"[Tizim: {doc.file_name} fayli allaqachon qabul qilinib, saqlandi. Qayta so'ramang.] "
