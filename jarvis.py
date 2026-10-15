@@ -10,6 +10,22 @@ from telegram.ext import (ApplicationBuilder, MessageHandler, CommandHandler,
 UPLOADS = {}   # chat_id -> oxirgi yuklangan faylning diskdagi manzili
 DEL_CACHE = {}    # (chat_id, msg_id) -> {"chat_name","sender","text","time"}
 DEL_ORDER = []    # DEL_CACHE hajmini cheklash uchun
+VOICE_MODE = {}   # chat_id -> True bo'lsa, har javob ovozli ham yuboriladi
+
+async def tts_save(text, chat):
+    """O'zbekcha matnni ovozga aylantiradi. Google'da sof o'zbek ovozi
+    yo'q, shuning uchun eng yaqin (turkcha) ovozga avtomatik o'tadi."""
+    from gtts import gTTS
+    os.makedirs("tts", exist_ok=True)
+    path = os.path.join("tts", f"{chat}.mp3")
+    text = (text or "").strip()[:1500] or "Bo'sh xabar."
+    for lang in ("uz", "tr", "ru", "en"):
+        try:
+            gTTS(text=text, lang=lang).save(path)
+            return path
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 def start_keepalive_server():
     """Render bepul Web Service rejasi port kutadi; shu port uchun soxta server."""
@@ -29,6 +45,7 @@ if os.environ.get("RENDER"):
 
 load_dotenv("jarvis.env")
 ADMIN = int(os.environ["ADMIN_CHAT_ID"])
+VOICE_MODE[ADMIN] = True   # so'ralgani uchun standart yoqilgan
 TZ = dt.timezone(dt.timedelta(hours=5))  # Toshkent
 
 # --- Kirish (autentifikatsiya) ---
@@ -679,10 +696,7 @@ async def dispatch(name, args, ctx, chat):
         if name == "tg_read_chat":
             return await tg_read_chat(**args)
     if name == "send_voice":
-        from gtts import gTTS
-        os.makedirs("tts", exist_ok=True)
-        path = os.path.join("tts", f"{chat}.mp3")
-        gTTS(text=args["text"][:1500], lang="uz").save(path)
+        path = await tts_save(args["text"], chat)
         with open(path, "rb") as f:
             await ctx.bot.send_voice(chat, f)
         return "✅ Ovozli xabar yuborildi."
@@ -736,6 +750,17 @@ async def handle_text(chat, text, update, ctx):
         AUTHORIZED.discard(chat)
         save_auth()
         await update.message.reply_text("Chiqdingiz. Qayta kirish uchun parolni yozing.")
+        return
+
+    if text.lower() in ("ovozli javobni yoq", "ovozli rejim yoq", "ovoz yoq"):
+        VOICE_MODE[chat] = True
+        await update.message.reply_text(
+            "🔊 *Avtomatik ovozli javob yoqildi.*", parse_mode="Markdown")
+        return
+    if text.lower() in ("ovozli javobni o'chir", "ovozli rejim o'chir", "ovoz o'chir"):
+        VOICE_MODE[chat] = False
+        await update.message.reply_text(
+            "🔇 *Avtomatik ovozli javob o'chirildi.*", parse_mode="Markdown")
         return
 
     CURRENT["chat"] = chat
@@ -814,6 +839,13 @@ async def handle_text(chat, text, update, ctx):
             await update.message.reply_text(final, parse_mode="Markdown")
         except Exception:
             await update.message.reply_text(final)
+        if VOICE_MODE.get(chat):
+            try:
+                path = await tts_save(final, chat)
+                with open(path, "rb") as f:
+                    await ctx.bot.send_voice(chat, f)
+            except Exception as e:
+                print("Avto-ovoz xato:", e)
     except Exception as e:
         await update.message.reply_text(f"Xato: {e}")
 
